@@ -154,91 +154,101 @@ module overmind::price_oracle {
             PriceBoard resources
         @param admin - signer representing the oracle admin
     */
+
+
+
+
+
+
+// ... (Previous code)
+
+// Initialization method
+// Initialization method
 fun init_module(admin: &signer) {
-    // Create the resource account
-    let resource_account = 0x1::Account::create<overmind::price_oracle::State>(
-        ResourceAccount { admin: *admin },
-        &SEED,
-    );
+    // Create the resource account with the specified seed
+    let resource_account = account::create_resource_account::<State>(admin, SEED);
 
     // Initialize the State resource
     let state = State {
-        signer_cap: SignerCapability::create(),
-        price_feed_updated_event: event::EventHandle::create(),
+        signer_cap: admin.cap(),
+        price_feed_updated_event: event::new_handle(),
     };
-    
-    // Initialize the PriceBoard resource with an empty table
-    let price_board = PriceBoard { prices: Table::empty() };
-
-    // Save the State and PriceBoard resources
-    State::save(&resource_account, state);
-    PriceBoard::save(&resource_account, price_board);
+    resource_account.save(state);
 }
 
 
-
-// Function to update the price feed
+// Add or update the price of a specified pair
 public entry fun update_price_feed(
-    admin: &signer,
+    admin: &signer, 
     pair: String,
-    price: u128,
-    confidence: u128,
+    price: u128, 
+    confidence: u128
 ) acquires State, PriceBoard {
-    let signer_cap = borrow_global<State>().signer_cap;
- if( !signer_cap.check_capability_access(admin, SignerCapability::Signer)) {
-    event::emit_abort(ErrorCodeForAllAborts, "Only the oracle admin can update price feeds");
-}
+    // Ensure that the caller is the admin
+    assert(admin.cap() == State::load().signer_cap, ErrorCodeForAllAborts);
 
+    // Get the current timestamp
+    let current_timestamp = timestamp::now_seconds();
 
-    let mut price_board = borrow_global_mut<PriceBoard>();
-    let mut price_feed = price_board.prices.get(pair);
-    if (!price_feed.is_none()) {
-        price_feed = price_feed.unwrap();
-        price_feed.latest_attestation_timestamp_seconds = timestamp::now_seconds();
-        price_feed.price = Price { price, confidence };
-    } else {
-        price_board.prices.insert(pair, PriceFeed {
-            latest_attestation_timestamp_seconds: timestamp::now_seconds(),
-            pair,
-            price: Price { price, confidence },
-        });
-    }
+    // Create or update the PriceFeed for the specified pair
+    let mut price_board = PriceBoard::load();
+    let mut price_feed = price_board.prices.get_or_default(&pair);
 
-    borrow_global<State>().price_feed_updated_event.emit(PriceFeedUpdatedEvent {
-        pair,
+    // Update the PriceFeed
+    price_feed.latest_attestation_timestamp_seconds = current_timestamp;
+    price_feed.pair = pair;
+    price_feed.price = Price { price, confidence };
+
+    // Save the updated PriceFeed to the PriceBoard
+    price_board.prices.insert(&pair, price_feed);
+    price_board.save();
+
+    // Emit the PriceFeedUpdatedEvent
+    let event_data = PriceFeedUpdatedEvent {
+        pair: pair.clone(),
         price: Price { price, confidence },
-        update_timestamp_seconds: timestamp::now_seconds(),
-    });
+        update_timestamp_seconds: current_timestamp,
+    };
+    State::load().price_feed_updated_event.emit(event_data);
 }
 
-// Function to get the latest price
+// Retrieve the latest price as long as it is attested within the default maximum attestation duration
 public fun get_price(pair: String): Price acquires PriceBoard {
-    let price_board = borrow_global<PriceBoard>();
-    let price_feed = price_board.prices.get(pair);
-    if (price_feed.is_none() || (timestamp::now_seconds() - price_feed.unwrap().latest_attestation_timestamp_seconds) > MAXIMUM_FRESH_DURATION_SECONDS) {
-        event::emit_abort(ErrorCodeForAllAborts, "Price for the specified pair is stale");
-    }
-    return price_feed.unwrap().price;
+    // Get the PriceFeed for the specified pair
+    let price_feed = PriceBoard::load().prices.get(&pair);
+    assert(price_feed.is_some(), ErrorCodeForAllAborts);
+
+    // Ensure that the price is not stale
+    let max_attestation_duration = MAXIMUM_FRESH_DURATION_SECONDS; // You need to define this constant
+    let current_timestamp = timestamp::now_seconds();
+    assert(current_timestamp - price_feed.unwrap().latest_attestation_timestamp_seconds <= max_attestation_duration, ErrorCodeForAllAborts);
+
+    // Return the latest price
+    price_feed.unwrap().price
 }
 
-// Function to get the latest price with a maximum age constraint
+// Retrieve the latest price as long as it is attested no later than maximum_age_seconds ago
 public fun get_price_no_older_than(pair: String, maximum_age_seconds: u64): Price acquires PriceBoard {
-    let price_board = borrow_global<PriceBoard>();
-    let price_feed = price_board.prices.get(pair);
-    if (price_feed.is_none() || (timestamp::now_seconds() - price_feed.unwrap().latest_attestation_timestamp_seconds) > maximum_age_seconds) {
-        event::emit_abort(ErrorCodeForAllAborts, "Price for the specified pair is too old");
-    }
-    return price_feed.unwrap().price;
+    // Get the PriceFeed for the specified pair
+    let price_feed = PriceBoard::load().prices.get(&pair);
+    assert(price_feed.is_some(), ErrorCodeForAllAborts);
+
+    // Ensure that the price is not stale
+    let current_timestamp = timestamp::now_seconds();
+    assert(current_timestamp - price_feed.unwrap().latest_attestation_timestamp_seconds <= maximum_age_seconds, ErrorCodeForAllAborts);
+
+    // Return the latest price
+    price_feed.unwrap().price
 }
 
-// Function to get the latest price without checking for staleness
+// Retrieve the latest price regardless of when it was attested
 public fun get_price_unsafe(pair: String): (Price, u64) acquires PriceBoard {
-    let price_board = borrow_global<PriceBoard>();
-    let price_feed = price_board.prices.get(pair);
-    if (price_feed.is_none()) {
-        event::emit_abort(ErrorCodeForAllAborts, "Price for the specified pair does not exist");
-    }
-    return (price_feed.unwrap().price, price_feed.unwrap().latest_attestation_timestamp_seconds);
+    // Get the PriceFeed for the specified pair
+    let price_feed = PriceBoard::load().prices.get(&pair);
+    assert(price_feed.is_some(), ErrorCodeForAllAborts);
+
+    // Return the latest price and attestation timestamp
+    (price_feed.unwrap().price, price_feed.unwrap().latest_attestation_timestamp_seconds)
 }
 
 
