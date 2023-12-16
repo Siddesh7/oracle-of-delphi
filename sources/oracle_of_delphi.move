@@ -154,61 +154,93 @@ module overmind::price_oracle {
             PriceBoard resources
         @param admin - signer representing the oracle admin
     */
-    fun init_module(admin: &signer) {
-	
+fun init_module(admin: &signer) {
+    // Create the resource account
+    let resource_account = 0x1::Account::create<overmind::price_oracle::State>(
+        ResourceAccount { admin: *admin },
+        &SEED,
+    );
+
+    // Initialize the State resource
+    let state = State {
+        signer_cap: SignerCapability::create(),
+        price_feed_updated_event: event::EventHandle::create(),
+    };
+    
+    // Initialize the PriceBoard resource with an empty table
+    let price_board = PriceBoard { prices: Table::empty() };
+
+    // Save the State and PriceBoard resources
+    State::save(&resource_account, state);
+    PriceBoard::save(&resource_account, price_board);
+}
+
+
+
+// Function to update the price feed
+public entry fun update_price_feed(
+    admin: &signer,
+    pair: String,
+    price: u128,
+    confidence: u128,
+) acquires State, PriceBoard {
+    let signer_cap = borrow_global<State>().signer_cap;
+ if( !signer_cap.check_capability_access(admin, SignerCapability::Signer)) {
+    event::emit_abort(ErrorCodeForAllAborts, "Only the oracle admin can update price feeds");
+}
+
+
+    let mut price_board = borrow_global_mut<PriceBoard>();
+    let mut price_feed = price_board.prices.get(pair);
+    if (!price_feed.is_none()) {
+        price_feed = price_feed.unwrap();
+        price_feed.latest_attestation_timestamp_seconds = timestamp::now_seconds();
+        price_feed.price = Price { price, confidence };
+    } else {
+        price_board.prices.insert(pair, PriceFeed {
+            latest_attestation_timestamp_seconds: timestamp::now_seconds(),
+            pair,
+            price: Price { price, confidence },
+        });
     }
 
-    /* 
-        Adds or updates the price of a specified pair. This function can only be called by the 
-        oracle admin. Abort if the caller is not the admin.
-        @param admin - signer representing the oracle admin
-        @param pair - id/coin pair identifying the coin pair price being updated
-        @param price - the new price scaled with 8 decimal places
-        @param confidence - the interval of confidence for the price scaled with 8 decimal places
-    */
-    public entry fun update_price_feed(
-        admin: &signer, 
-        pair: String,
-        price: u128, 
-        confidence: u128
-    ) acquires State, PriceBoard {
+    borrow_global<State>().price_feed_updated_event.emit(PriceFeedUpdatedEvent {
+        pair,
+        price: Price { price, confidence },
+        update_timestamp_seconds: timestamp::now_seconds(),
+    });
+}
 
+// Function to get the latest price
+public fun get_price(pair: String): Price acquires PriceBoard {
+    let price_board = borrow_global<PriceBoard>();
+    let price_feed = price_board.prices.get(pair);
+    if (price_feed.is_none() || (timestamp::now_seconds() - price_feed.unwrap().latest_attestation_timestamp_seconds) > MAXIMUM_FRESH_DURATION_SECONDS) {
+        event::emit_abort(ErrorCodeForAllAborts, "Price for the specified pair is stale");
     }
+    return price_feed.unwrap().price;
+}
 
-    /* 
-        Returns the latest price as long as it is attested within the default maximum attestation 
-        duration. The default maximum attestation duration is defined by the 
-        MAXIMUM_FRESH_DURATION_SECONDS constant. Abort if the price is stale or if the pair does
-        not exist.
-        @param pair - id of the coin pair being updated
-        @return - the price of the pair along with the confidence
-    */
-    public fun get_price(pair: String): Price acquires PriceBoard {
-
+// Function to get the latest price with a maximum age constraint
+public fun get_price_no_older_than(pair: String, maximum_age_seconds: u64): Price acquires PriceBoard {
+    let price_board = borrow_global<PriceBoard>();
+    let price_feed = price_board.prices.get(pair);
+    if (price_feed.is_none() || (timestamp::now_seconds() - price_feed.unwrap().latest_attestation_timestamp_seconds) > maximum_age_seconds) {
+        event::emit_abort(ErrorCodeForAllAborts, "Price for the specified pair is too old");
     }
+    return price_feed.unwrap().price;
+}
 
-    /* 
-        Returns the latest price as long as it is attested no later than maximum_age_seconds ago.
-        Abort if the price is stale or if the pair does not exist.
-        @param pair - id of the coin pair being updated
-        @param maximum_age_seconds - the maximum age of the price in seconds the request price can be
-        @return - the price of the pair along with the confidence
-    */
-    public fun get_price_no_older_than(pair: String, maximum_age_seconds: u64): Price 
-    acquires PriceBoard {
-        
+// Function to get the latest price without checking for staleness
+public fun get_price_unsafe(pair: String): (Price, u64) acquires PriceBoard {
+    let price_board = borrow_global<PriceBoard>();
+    let price_feed = price_board.prices.get(pair);
+    if (price_feed.is_none()) {
+        event::emit_abort(ErrorCodeForAllAborts, "Price for the specified pair does not exist");
     }
+    return (price_feed.unwrap().price, price_feed.unwrap().latest_attestation_timestamp_seconds);
+}
 
-    /* 
-        Returns the latest price regardless of when it was attested. Abort if the pair does not
-        exist.
-        @param pair - id of the coin pair being updated
-        @return - the price of the pair along with the confidence, and the timestamp of when the 
-                    the price was attested
-    */
-    public fun get_price_unsafe(pair: String): (Price, u64) acquires PriceBoard {
-        
-    }
 
     //==============================================================================================
     // Helper functions
